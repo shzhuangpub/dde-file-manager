@@ -174,15 +174,16 @@ EntryFileInfo::EntryOrder BlockEntryFileEntity::order() const
     // NOTE(xust): removable/hintSystem is not always correct in some certain hardwares.
     if (datas.value(DeviceProperty::kMountPoint).toString() == "/")
         return EntryFileInfo::EntryOrder::kOrderSysDiskRoot;
-    if (datas.value(DeviceProperty::kIdLabel).toString().startsWith("_dde_"))
+
+    bool canPowerOff = datas.value(DeviceProperty::kCanPowerOff).toBool();
+    if (datas.value(DeviceProperty::kIdLabel).toString().startsWith("_dde_data") /* && !canPowerOff*/)
         return EntryFileInfo::EntryOrder::kOrderSysDiskData;
 
     if (datas.value(DeviceProperty::kOptical).toBool()
-            || datas.value(DeviceProperty::kOpticalDrive).toBool())
+        || datas.value(DeviceProperty::kOpticalDrive).toBool())
         return EntryFileInfo::EntryOrder::kOrderOptical;
 
-    if (datas.value(DeviceProperty::kEjectable).toBool()
-            && datas.value(DeviceProperty::kCanPowerOff).toBool())
+    if (canPowerOff && !isSiblingOfRoot())
         return EntryFileInfo::EntryOrder::kOrderRemovableDisks;
 
     return EntryFileInfo::EntryOrder::kOrderSysDisks;
@@ -338,4 +339,19 @@ void BlockEntryFileEntity::resetWindowsVolTag()
     datas.remove(WinVolTagKeys::kWinUUID);
     datas.remove(WinVolTagKeys::kWinDrive);
     datas.remove(WinVolTagKeys::kWinLabel);
+}
+
+bool BlockEntryFileEntity::isSiblingOfRoot() const
+{
+    static QString rootDrive;
+    static std::once_flag flg;
+    std::call_once(flg, [&rootDrive] {
+        const QString &rootDev = DeviceUtils::getMountInfo("/", false);
+        const QString &rootDevId = DeviceUtils::getBlockDeviceId(rootDev);
+        const auto &data = DevProxyMng->queryBlockInfo(rootDevId);
+        rootDrive = data.value(DeviceProperty::kDrive).toString();
+        qInfo() << "got root drive:" << rootDrive << rootDev;
+    });
+
+    return rootDrive == this->datas.value(DeviceProperty::kDrive);
 }
