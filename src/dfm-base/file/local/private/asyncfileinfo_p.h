@@ -33,6 +33,7 @@ public:
     QMimeDatabase::MatchMode mimeTypeMode;
     std::atomic_bool notInit { false };
     std::atomic_bool cacheing { false };
+    std::atomic_bool cacheingAttributes { false };
     char memrySeat[5];
     QSharedPointer<DFileInfo> dfmFileInfo { nullptr };   // dfm文件的信息
     QVariantHash extraProperties;   // 扩展属性列表
@@ -48,6 +49,7 @@ public:
     QMap<AsyncFileInfo::AsyncAttributeID, QVariant> cacheAsyncAttributes;
     QReadWriteLock notifyLock;
     QMultiMap<QUrl, QString> notifyUrls;
+    quint64 tokenKey{0};
     AsyncFileInfo *const q;
 
 public:

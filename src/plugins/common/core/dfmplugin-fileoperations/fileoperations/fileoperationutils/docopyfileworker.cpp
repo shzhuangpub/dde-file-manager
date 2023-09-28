@@ -5,6 +5,7 @@
 #include "docopyfileworker.h"
 
 #include <dfm-base/utils/fileutils.h>
+#include <dfm-base/base/device/deviceutils.h>
 
 #include <dfm-io/dfmio_utils.h>
 
@@ -145,7 +146,7 @@ bool DoCopyFileWorker::doDfmioFileCopy(FileInfoPointer fromInfo, FileInfoPointer
     bool ret{ false };
 
     DFile::CopyFlags flag = DFile::CopyFlag::kNoFollowSymlinks | DFile::CopyFlag::kOverwrite;
-    if (FileUtils::isMtpFile(toUrl))
+    if (!DeviceUtils::supportSetPermissionsDevice(toUrl))
         flag |= DFile::CopyFlag::kTargetDefaultPerms;
     AbstractJobHandler::SupportAction action { AbstractJobHandler::SupportAction::kNoAction };
     do {
@@ -171,8 +172,6 @@ bool DoCopyFileWorker::doDfmioFileCopy(FileInfoPointer fromInfo, FileInfoPointer
 
     workData->everyFileWriteSize.remove(fromUrl);
     delete data;
-
-    syncBlockFile(toInfo);
 
     return ret;
 }
@@ -223,12 +222,17 @@ bool DoCopyFileWorker::doCopyFilePractically(const FileInfoPointer fromInfo, con
         setTargetPermissions(fromInfo, toInfo);
         workData->zeroOrlinkOrDirWriteSize += FileUtils::getMemoryPageSize();
         FileUtils::notifyFileChangeManual(DFMBASE_NAMESPACE::Global::FileNotifyType::kFileAdded, toInfo->urlOf(UrlInfoType::kUrl));
+        if (workData->exBlockSyncEveryWrite)
+            sync();
         return true;
     }
     // resize target file
     if (workData->jobFlags.testFlag(AbstractJobHandler::JobFlag::kCopyResizeDestinationFile) && !resizeTargetFile(fromInfo, toInfo, toDevice, skip))
         return false;
     // 循环读取和写入文件，拷贝
+    int toFd = -1;
+    if (workData->exBlockSyncEveryWrite)
+        toFd = open(toInfo->urlOf(UrlInfoType::kUrl).path().toUtf8().toStdString().data(), O_RDONLY);
     qint64 blockSize = fromInfo->size() > kMaxBufferLength ? kMaxBufferLength : fromInfo->size();
     char *data = new char[static_cast<uint>(blockSize + 1)];
     uLong sourceCheckSum = adler32(0L, nullptr, 0);
@@ -251,6 +255,10 @@ bool DoCopyFileWorker::doCopyFilePractically(const FileInfoPointer fromInfo, con
             sourceCheckSum = adler32(sourceCheckSum, reinterpret_cast<Bytef *>(data), static_cast<uInt>(sizeRead));
         }
 
+        // 执行同步策略
+        if (workData->exBlockSyncEveryWrite && toFd > 0)
+            syncfs(toFd);
+
         toInfo->cacheAttribute(DFMIO::DFileInfo::AttributeID::kStandardSize, toDevice->size());
 
     } while (fromDevice->pos() != fromInfo->size());
@@ -258,7 +266,12 @@ bool DoCopyFileWorker::doCopyFilePractically(const FileInfoPointer fromInfo, con
     delete[] data;
     data = nullptr;
 
-    syncBlockFile(toInfo);
+    // 执行同步策略
+    if (workData->exBlockSyncEveryWrite && toFd > 0)
+        syncfs(toFd);
+
+    if (toFd > 0)
+        close(toFd);
 
     // 对文件加权
     setTargetPermissions(fromInfo, toInfo);
@@ -712,11 +725,13 @@ bool DoCopyFileWorker::isStopped()
  */
 void DoCopyFileWorker::setTargetPermissions(const FileInfoPointer &fromInfo, const FileInfoPointer &toInfo)
 {
+    if (!DeviceUtils::supportSetPermissionsDevice(toInfo->urlOf(UrlInfoType::kUrl)))
+        return;
     // 修改文件修改时间
     localFileHandler->setFileTime(toInfo->urlOf(UrlInfoType::kUrl), fromInfo->timeOf(TimeInfoType::kLastRead).value<QDateTime>(), fromInfo->timeOf(TimeInfoType::kLastModified).value<QDateTime>());
     QFileDevice::Permissions permissions = fromInfo->permissions();
     QString path = fromInfo->urlOf(UrlInfoType::kUrl).path();
     //权限为0000时，源文件已经被删除，无需修改新建的文件的权限为0000
-    if (permissions != 0000 && !FileUtils::isMtpFile(toInfo->urlOf(UrlInfoType::kUrl)))
+    if (permissions != 0000)
         localFileHandler->setPermissions(toInfo->urlOf(UrlInfoType::kUrl), permissions);
 }

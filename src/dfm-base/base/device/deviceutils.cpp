@@ -246,6 +246,34 @@ bool DeviceUtils::isSftp(const QUrl &url)
     return hasMatch(url.path(), smbMatch);
 }
 
+bool DeviceUtils::isMtpFile(const QUrl &url)
+{
+    if (!url.isValid())
+        return false;
+
+    const QString &path = url.toLocalFile();
+    static const QString gvfsMatch { R"(^/run/user/\d+/gvfs/mtp:host|^/root/.gvfs/mtp:host)" };
+    QRegularExpression re { gvfsMatch };
+    QRegularExpressionMatch match { re.match(path) };
+    return match.hasMatch();
+}
+
+bool DeviceUtils::supportDfmioCopyDevice(const QUrl &url)
+{
+    if (!url.isValid())
+        return false;
+
+    return !isMtpFile(url);
+}
+
+bool DeviceUtils::supportSetPermissionsDevice(const QUrl &url)
+{
+    if (!url.isValid())
+        return false;
+
+    return !isMtpFile(url);
+}
+
 bool DeviceUtils::isExternalBlock(const QUrl &url)
 {
     return DeviceProxyManager::instance()->isFileOfExternalBlockMounts(url.path());
@@ -336,14 +364,18 @@ QString DeviceUtils::nameOfSystemDisk(const QVariantMap &datas)
 {
     QString label = datas.value(kIdLabel).toString();
     qlonglong size = datas.value(kSizeTotal).toLongLong();
+    QString mountPoint = datas.value(kMountPoint).toString();
 
     // get system disk name if there is no alias
-    if (datas.value(kMountPoint).toString() == "/")
+    if (mountPoint == "/")
         return QObject::tr("System Disk");
-    if (datas.value(kIdLabel).toString().startsWith("_dde_data"))
-        return QObject::tr("Data Disk");
-    if (datas.value(kIdLabel).toString().startsWith("_dde_"))
-        return datas.value(kIdLabel).toString().mid(5);
+    if (!mountPoint.startsWith("/media/"))
+    {
+        if (label.startsWith("_dde_data"))
+            return QObject::tr("Data Disk");
+        if (label.startsWith("_dde_"))
+            return datas.value(kIdLabel).toString().mid(5);
+    }
     return nameOfDefault(label, size);
 }
 
@@ -583,6 +615,14 @@ QString DeviceUtils::fileSystemType(const QUrl &url)
 qint64 DeviceUtils::deviceBytesFree(const QUrl &url)
 {
     return DFMIO::DFMUtils::deviceBytesFree(url);
+}
+
+bool DeviceUtils::isUnmountSamba(const QUrl &url)
+{
+    if (!isSamba(url))
+        return false;
+
+    return !DevProxyMng->isFileOfProtocolMounts(url.path());
 }
 
 bool DeviceUtils::findDlnfsPath(const QString &target, Compare func)

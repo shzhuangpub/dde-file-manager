@@ -368,8 +368,11 @@ int AsyncFileInfo::countChildFileAsync() const
 
 QString AsyncFileInfo::displayOf(const DisPlayInfoType type) const
 {
-    if (type == DisPlayInfoType::kFileDisplayName)
-        return d->asyncAttribute(AsyncFileInfo::AsyncAttributeID::kStandardDisplayName).toString();
+    if (type == DisPlayInfoType::kFileDisplayName) {
+        if (d->asyncAttribute(AsyncFileInfo::AsyncAttributeID::kStandardDisplayName).isValid())
+            return d->asyncAttribute(AsyncFileInfo::AsyncAttributeID::kStandardDisplayName).toString();
+        return url.fileName();
+    }
     return FileInfo::displayOf(type);
 }
 
@@ -385,7 +388,7 @@ QVariantHash AsyncFileInfo::extraProperties() const
 
 QIcon AsyncFileInfo::fileIcon()
 {
-    if (d->cacheing) {
+    if (d->cacheing || d->cacheingAttributes) {
         QIcon icon;
         {   // if already loaded thumb just return it.
             QReadLocker rlk(&d->iconLock);
@@ -521,13 +524,21 @@ void AsyncFileInfo::removeNotifyUrl(const QUrl &url, const QString &infoPtr)
     d->notifyUrls.remove(url, infoPtr);
 }
 
-void AsyncFileInfo::cacheAsyncAttributes()
+int AsyncFileInfo::cacheAsyncAttributes()
 {
     assert(qApp->thread() != QThread::currentThread());
-    if (!d->cacheing)
-        d->cacheing = true;
+    auto dfmFileInfo = d->dfmFileInfo;
+    if (d->tokenKey != quintptr(dfmFileInfo.data()))
+        return -1;
+
+    if (d->cacheingAttributes)
+        return 0;
+
+    if (!d->cacheingAttributes)
+        d->cacheingAttributes = true;
     d->cacheAllAttributes();
-    d->cacheing = false;
+    d->cacheingAttributes = false;
+    return 1;
 }
 
 bool AsyncFileInfo::asyncQueryDfmFileInfo(int ioPriority, FileInfo::initQuerierAsyncCallback func, void *userData)
@@ -542,7 +553,7 @@ bool AsyncFileInfo::asyncQueryDfmFileInfo(int ioPriority, FileInfo::initQuerierA
     if (!d->dfmFileInfo) {
         d->cacheing = false;
         return false;
-    }
+    } 
 
     d->dfmFileInfo->initQuerierAsync(ioPriority, func, userData);
     d->cacheing = false;
@@ -572,6 +583,7 @@ void AsyncFileInfoPrivate::init(const QUrl &url, QSharedPointer<DFMIO::DFileInfo
     if (dfileInfo) {
         notInit = true;
         dfmFileInfo = dfileInfo;
+        tokenKey = quintptr(dfmFileInfo.data());
         return;
     }
 
@@ -581,6 +593,7 @@ void AsyncFileInfoPrivate::init(const QUrl &url, QSharedPointer<DFMIO::DFileInfo
         qWarning("Failed, dfm-io use factory create fileinfo");
         abort();
     }
+    tokenKey = quintptr(dfmFileInfo.data());
 }
 
 QMimeType AsyncFileInfoPrivate::mimeTypes(const QString &filePath, QMimeDatabase::MatchMode mode, const QString &inod, const bool isGvfs)
@@ -608,8 +621,11 @@ QIcon AsyncFileInfoPrivate::defaultIcon()
         const auto &&target = q->pathOf(PathInfoType::kSymLinkTarget);
         if (!target.isEmpty() && target != q->pathOf(PathInfoType::kFilePath)) {
             FileInfoPointer info = InfoFactory::create<FileInfo>(QUrl::fromLocalFile(target));
-            if (info)
+            if (info) {
+                if (info->fileIcon().name() == "unknown")
+                    info->customData(Global::ItemRoles::kItemFileRefreshIcon);
                 icon = info->fileIcon();
+            }
         }
     }
 
@@ -746,7 +762,7 @@ QString AsyncFileInfoPrivate::path() const
  */
 QString AsyncFileInfoPrivate::filePath() const
 {
-    return this->attribute(DFileInfo::AttributeID::kStandardFilePath).toString();
+    return q->fileUrl().path();
 }
 
 /*!
@@ -985,7 +1001,6 @@ void AsyncFileInfoPrivate::cacheAllAttributes()
     tmp.insert(AsyncFileInfo::AsyncAttributeID::kStandardSize, attribute(DFileInfo::AttributeID::kStandardSize));
     tmp.insert(AsyncFileInfo::AsyncAttributeID::kStandardFilePath, filePath());
     tmp.insert(AsyncFileInfo::AsyncAttributeID::kStandardParentPath, path());
-    auto tmpdfmfileinfo = dfmFileInfo;
     tmp.insert(AsyncFileInfo::AsyncAttributeID::kStandardFileExists, DFile(q->fileUrl()).exists());
     // redirectedFileUrl
     auto symlink = symLinkTarget();
@@ -1021,7 +1036,6 @@ void AsyncFileInfoPrivate::cacheAllAttributes()
     tmp.insert(AsyncFileInfo::AsyncAttributeID::kUnixInode, attribute(DFileInfo::AttributeID::kUnixInode));
     tmp.insert(AsyncFileInfo::AsyncAttributeID::kUnixUID, attribute(DFileInfo::AttributeID::kUnixUID));
     tmp.insert(AsyncFileInfo::AsyncAttributeID::kUnixGID, attribute(DFileInfo::AttributeID::kUnixGID));
-    tmp.insert(AsyncFileInfo::AsyncAttributeID::kAccessPermissions, QVariant::fromValue(dfmFileInfo->permissions()));
     tmp.insert(AsyncFileInfo::AsyncAttributeID::kTimeCreated, attribute(DFileInfo::AttributeID::kTimeCreated));
     tmp.insert(AsyncFileInfo::AsyncAttributeID::kTimeChanged, attribute(DFileInfo::AttributeID::kTimeChanged));
     tmp.insert(AsyncFileInfo::AsyncAttributeID::kTimeModified, attribute(DFileInfo::AttributeID::kTimeModified));
@@ -1030,10 +1044,10 @@ void AsyncFileInfoPrivate::cacheAllAttributes()
     tmp.insert(AsyncFileInfo::AsyncAttributeID::kTimeChangedUsec, attribute(DFileInfo::AttributeID::kTimeChangedUsec));
     tmp.insert(AsyncFileInfo::AsyncAttributeID::kTimeModifiedUsec, attribute(DFileInfo::AttributeID::kTimeModifiedUsec));
     tmp.insert(AsyncFileInfo::AsyncAttributeID::kTimeAccessUsec, attribute(DFileInfo::AttributeID::kTimeAccessUsec));
-    if (tmpdfmfileinfo)
-        tmp.insert(AsyncFileInfo::AsyncAttributeID::kAccessPermissions, QVariant::fromValue(dfmFileInfo->permissions()));
-
     tmp.insert(AsyncFileInfo::AsyncAttributeID::kStandardFileType, QVariant::fromValue(fileType()));
+    auto tmpdfmfileinfo = dfmFileInfo;
+    if (tmpdfmfileinfo)
+        tmp.insert(AsyncFileInfo::AsyncAttributeID::kAccessPermissions, QVariant::fromValue(tmpdfmfileinfo->permissions()));
     // GenericIconName
     tmp.insert(AsyncFileInfo::AsyncAttributeID::kStandardContentType, attribute(DFileInfo::AttributeID::kStandardContentType));
     // iconname

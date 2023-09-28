@@ -122,11 +122,11 @@ bool BlockEntryFileEntity::exists() const
     }
 
     if (!hasFileSystem && !opticalDrive && !isEncrypted) {
-        bool removable { qvariant_cast<bool>(datas.value(DeviceProperty::kRemovable)) };
-        if (!removable) {   // 满足外围条件的本地磁盘，直接遵循以前的处理直接 continue
-            qInfo() << msg << "system disk without filesystem." << id;
+//        bool removable { qvariant_cast<bool>(datas.value(DeviceProperty::kRemovable)) };
+//        if (!removable) {   // 满足外围条件的本地磁盘，直接遵循以前的处理直接 continue
+            qInfo() << msg << "no fs, no optical, no encrypted." << id;
             return false;
-        }
+//        }
     }
 
     if (cryptoBackingDevice.length() > 1) {
@@ -135,10 +135,10 @@ bool BlockEntryFileEntity::exists() const
     }
 
     // 是否是设备根节点，设备根节点无须记录
-    if (hasPartitionTable) {   // 替换 FileUtils::deviceShouldBeIgnore
-        qInfo() << msg << "device with a partition table." << id;
-        return false;
-    }
+    //    if (hasPartitionTable) {   // 替换 FileUtils::deviceShouldBeIgnore
+    //        qInfo() << msg << "device with a partition table." << id;
+    //        return false;
+    //    }
 
     if (hasPartition && hasExtendedPartition) {
         qInfo() << msg << "device with extended partition." << id;
@@ -282,10 +282,10 @@ void BlockEntryFileEntity::loadDiskInfo()
     auto id = QString(DeviceId::kBlockDeviceIdPrefix)
             + entryUrl.path().remove("." + QString(SuffixInfo::kBlock));
 
-    datas = UniversalUtils::convertFromQMap(DevProxyMng->queryBlockInfo(id));
+    datas = UniversalUtils::convertFromQMap(DevProxyMng->queryBlockInfo(id, true));
     auto clearBlkId = datas.value(DeviceProperty::kCleartextDevice).toString();
     if (datas.value(DeviceProperty::kIsEncrypted).toBool() && clearBlkId.length() > 1) {
-        auto clearBlkData = DevProxyMng->queryBlockInfo(clearBlkId);
+        auto clearBlkData = DevProxyMng->queryBlockInfo(clearBlkId, true);
         datas.insert(BlockAdditionalProperty::kClearBlockProperty, clearBlkData);
     }
 

@@ -351,7 +351,7 @@ bool FileOperateBaseWorker::copyAndDeleteFile(const FileInfoPointer &fromInfo, c
 
         FileUtils::cacheCopyingFileUrl(url);
         initSignalCopyWorker();
-        if (fromInfo->size() > FileOperationsUtils::bigFileSize() && !FileUtils::isMtpFile(this->targetUrl)) {
+        if (fromInfo->size() > bigFileSize || !supportDfmioCopy || workData->exBlockSyncEveryWrite) {
             ok = copyOtherFileWorker->doCopyFilePractically(fromInfo, toInfo, skip);
         } else {
             ok = copyOtherFileWorker->doDfmioFileCopy(fromInfo, toInfo, skip);
@@ -455,7 +455,7 @@ bool FileOperateBaseWorker::doCheckFile(const FileInfoPointer &fromInfo, const F
     bool isTrashFile = FileUtils::isTrashFile(fromInfo->urlOf(UrlInfoType::kUrl));
     if (isTrashFile) {
         auto trashInfoUrl= trashInfo(fromInfo);
-        fileNewName = fileOriginName(trashInfoUrl);
+        fileNewName = trashInfoUrl.isValid() ? fileOriginName(trashInfoUrl) : fileName;
     }
     newTargetInfo.reset();
     if (!doCheckNewFile(fromInfo, toInfo, newTargetInfo, fileNewName, skip, true))
@@ -615,7 +615,7 @@ bool FileOperateBaseWorker::checkAndCopyFile(const FileInfoPointer fromInfo, con
         while (bigFileCopy && !isStopped()) {
             QThread::msleep(10);
         }
-        if (fromInfo->size() > FileOperationsUtils::bigFileSize()) {
+        if (fromInfo->size() > bigFileSize) {
             bigFileCopy = true;
             auto result = doCopyLocalBigFile(fromInfo, toInfo, skip);
             bigFileCopy = false;
@@ -998,7 +998,7 @@ bool FileOperateBaseWorker::doCopyOtherFile(const FileInfoPointer fromInfo, cons
 
     FileUtils::cacheCopyingFileUrl(targetUrl);
     bool ok{ false };
-    if (fromInfo->size() > FileOperationsUtils::bigFileSize() && !FileUtils::isMtpFile(this->targetUrl)) {
+    if (fromInfo->size() > bigFileSize || !supportDfmioCopy || workData->exBlockSyncEveryWrite) {
         ok = copyOtherFileWorker->doCopyFilePractically(fromInfo, toInfo, skip);
     } else {
         ok = copyOtherFileWorker->doDfmioFileCopy(fromInfo, toInfo, skip);
@@ -1184,7 +1184,7 @@ bool FileOperateBaseWorker::canWriteFile(const QUrl &url) const
 void FileOperateBaseWorker::setAllDirPermisson()
 {
     for (auto info : dirPermissonList.list()) {
-        if (info->permission && !FileUtils::isMtpFile(info->target))
+        if (info->permission && supportSetPermission)
             localFileHandler->setPermissions(info->target, info->permission);
     }
 }
@@ -1304,9 +1304,11 @@ void FileOperateBaseWorker::determineCountProcessType()
                         }
 
                         if (targetIsRemovable) {
-                            countWriteType = CountWriteSizeType::kWriteBlockType;
+                            workData->exBlockSyncEveryWrite = FileOperationsUtils::blockSync();
+                            countWriteType = workData->exBlockSyncEveryWrite ? CountWriteSizeType::kCustomizeType : CountWriteSizeType::kWriteBlockType;
+                            targetDeviceStartSectorsWritten = workData->exBlockSyncEveryWrite ? 0 : getSectorsWritten();
+
                             workData->isBlockDevice = true;
-                            targetDeviceStartSectorsWritten = getSectorsWritten();
                         }
 
                         qDebug("Block device path: \"%s\", Sys dev path: \"%s\", Is removable: %d, Log-Sec: %d",
@@ -1328,24 +1330,11 @@ void FileOperateBaseWorker::syncFilesToDevice()
     if (CountWriteSizeType::kWriteBlockType != countWriteType)
         return;
 
-    qDebug() << __FUNCTION__ << "syncFilesToDevice begin";
-    // U盘执行同步操作
-    if (countWriteType == CountWriteSizeType::kWriteBlockType
-            && !blocakTargetRootPath.isEmpty()
-            && sourceFilesTotalSize < 5 * 1024 * 1024) {
-        int syncRet = 0;
-        QString tmpRoot = blocakTargetRootPath;
-        QPointer<FileOperateBaseWorker> me = this;
-        syncResult = QtConcurrent::run([&syncRet, tmpRoot]() {
-            qInfo() << "sync to block disk and target path = " << tmpRoot;
-            syncRet = QProcess::execute("sync", {"-f", tmpRoot});
-        });
-        // 检测同步时是否被停止，若停止则立即跳出
-        while (!syncResult.isFinished() && !isStopped()) {
-            QThread::msleep(10);
-        }
-    }
+    qInfo() << "start sync all file to extend block device!!!!! target : " << targetUrl;
+    sync();
+    qInfo() << "end sync all file to extend block device!!!!! target : " << targetUrl;
 
+    qDebug() << __FUNCTION__ << "syncFilesToDevice begin";
     qint64 writeSize = getWriteDataSize();
     while (!isStopped() && sourceFilesTotalSize > 0 && writeSize < sourceFilesTotalSize) {
         QThread::msleep(100);

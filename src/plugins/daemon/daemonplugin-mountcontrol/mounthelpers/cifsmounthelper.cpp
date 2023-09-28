@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "cifsmounthelper.h"
+#include "cifsmounthelper_p.h"
 #include "daemonplugin_mountcontrol_global.h"
 
 #include <QDebug>
@@ -28,6 +29,9 @@
 DAEMONPMOUNTCONTROL_USE_NAMESPACE
 
 static constexpr char kPolicyKitActionId[] { "com.deepin.filemanager.daemon.MountController" };
+
+CifsMountHelper::CifsMountHelper(QDBusContext *context)
+    : AbstractMountHelper(context), d(new CifsMountHelperPrivate()) { }
 
 QVariantMap CifsMountHelper::mount(const QString &path, const QVariantMap &opts)
 {
@@ -84,12 +88,15 @@ QVariantMap CifsMountHelper::mount(const QString &path, const QVariantMap &opts)
     static const QRegularExpression ipRegx(R"(^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$)");
     auto matchIp = ipRegx.match(host);
     if (!matchIp.hasMatch()) {
-        const QString &ip = getIpOfHost(host);
+        const QString &ip = d->parseIP(host, port == -1 ? 0 : port);
         if (!ip.isEmpty()) {
             params.insert(MountOptionsField::kIp, ip);
             qInfo() << "mount: got ip" << ip << "of host" << host;
         }
     }
+
+    const QString &version = d->probeVersion(host, port == -1 ? 0 : port);
+    params.insert(MountOptionsField::kVersion, version);
 
     int errNum = 0;
     QString errMsg;
@@ -317,8 +324,14 @@ std::string CifsMountHelper::convertArgs(const QVariantMap &opts)
         param += QString("uid=%1,").arg(user->pw_uid);
         param += QString("gid=%1,").arg(user->pw_gid);
     }
-    param += "iocharset=utf8,vers=default";
+    param += "iocharset=utf8";
     param += ",actimeo=5";   // bug 211337
+
+    if (opts.contains(MountOptionsField::kVersion))
+        param += QString(",vers=%1").arg(opts.value(MountOptionsField::kVersion).toString());
+    else
+        param += ",vers=default";
+
     return param.toStdString();
 }
 
@@ -375,7 +388,134 @@ bool CifsMountHelper::mkdirMountRootPath()
     }
 }
 
-QString CifsMountHelper::getIpOfHost(const QString &host)
+void CifsMountHelper::cleanMountPoint()
+{
+    QDir d("/media/");
+    auto &&children = d.entryInfoList(QDir::NoDotAndDotDot | QDir::AllDirs);
+    for (const auto &child : children) {
+        QDir dd(child.absoluteFilePath() + "/smbmounts");
+        if (!dd.exists())
+            continue;
+
+        auto &&mnts = dd.entryInfoList(QDir::NoDotAndDotDot | QDir::AllDirs);
+        for (const auto &mnt : mnts) {
+            auto &&path = mnt.absoluteFilePath();
+            QDir ddd(path);
+            if (ddd.entryList(QDir::NoDotAndDotDot | QDir::AllEntries).count() == 0) {
+                qDebug() << ddd.path() << "was cleaned";
+                rmdir(path);
+            }
+        }
+    }
+}
+
+SmbcAPI::SmbcAPI()
+{
+    init();
+}
+
+SmbcAPI::~SmbcAPI()
+{
+    if (smbcCtx && smbcFreeContext) {
+        int ret = smbcFreeContext(smbcCtx, true);
+        qInfo() << "free smbc client: " << ret;
+    }
+
+    if (libSmbc) {
+        if (!libSmbc->unload())
+            qCritical() << "cannot unload smbc";
+        delete libSmbc;
+    }
+    initialized = false;
+}
+
+bool SmbcAPI::isInitialized() const
+{
+    return initialized;
+}
+
+void SmbcAPI::init()
+{
+    if (initialized)
+        return;
+    libSmbc = new QLibrary("libsmbclient.so.0");
+    if (!libSmbc->load()) {
+        qCritical() << "cannot load smbc";
+        delete libSmbc;
+        libSmbc = nullptr;
+        return;
+    }
+
+    smbcNewContext = (FnSmbcNewContext)libSmbc->resolve("smbc_new_context");
+    smbcFreeContext = (FnSmbcFreeContext)libSmbc->resolve("smbc_free_context");
+    smbcNegprot = (FnSmbcNegprot)libSmbc->resolve("smbc_negprot");
+    smbcResolveHost = (FnSmbcResolveHost)libSmbc->resolve("smbc_resolve_host");
+
+    smbcCtx = smbcNewContext ? smbcNewContext() : nullptr;
+
+    initialized = (smbcNewContext && smbcFreeContext && smbcNegprot && smbcResolveHost
+                   && smbcCtx);
+
+    qInfo() << "smbc initialized: " << initialized;
+}
+
+FnSmbcNegprot SmbcAPI::getSmbcNegprot() const
+{
+    return smbcNegprot;
+}
+
+FnSmbcResolveHost SmbcAPI::getSmbcResolveHost() const
+{
+    return smbcResolveHost;
+}
+
+QMap<QString, QString> SmbcAPI::versionMapper()
+{
+    static QMap<QString, QString> mapper {
+        { "SMB3_11", "3.11" },
+        { "SMB3_10", "3.02" },
+        { "SMB3_02", "3.02" },
+        { "SMB3_00", "3.0" },
+        { "SMB2_24", "2.1" },
+        { "SMB2_22", "2.1" },
+        { "SMB2_10", "2.1" },
+        { "SMB2_02", "2.0" },
+        { "NT1", "1.0" },
+        { "DEFAULT", "default" },
+    };
+    return mapper;
+}
+
+QString CifsMountHelperPrivate::probeVersion(const QString &host, ushort port)
+{
+    if (!smbcAPI.isInitialized() || !smbcAPI.getSmbcNegprot())
+        return "default";
+
+    QString verName = smbcAPI.getSmbcNegprot()(host.toStdString().c_str(),
+                                               port,
+                                               3000,
+                                               "NT1",
+                                               "SMB3_11");
+    return SmbcAPI::versionMapper().value(verName, "default");
+}
+
+QString CifsMountHelperPrivate::parseIP(const QString &host, uint16_t port)
+{
+    if (!smbcAPI.isInitialized() || !smbcAPI.getSmbcResolveHost())
+        return parseIP_old(host);
+
+    char ip[INET6_ADDRSTRLEN];
+    int ret = smbcAPI.getSmbcResolveHost()(host.toStdString().c_str(),
+                                           port,
+                                           3000,
+                                           ip,
+                                           sizeof(ip));
+    if (ret != 0)
+        qWarning() << "cannot resolve ip address for" << host;
+    return QString(ip);
+}
+
+QString CifsMountHelperPrivate::parseIP_old(const QString &host)
 {
     if (host.isEmpty())
         return "";
@@ -406,25 +546,4 @@ QString CifsMountHelper::getIpOfHost(const QString &host)
 
     freeaddrinfo(result);
     return ipAddr;
-}
-
-void CifsMountHelper::cleanMountPoint()
-{
-    QDir d("/media/");
-    auto &&children = d.entryInfoList(QDir::NoDotAndDotDot | QDir::AllDirs);
-    for (const auto &child : children) {
-        QDir dd(child.absoluteFilePath() + "/smbmounts");
-        if (!dd.exists())
-            continue;
-
-        auto &&mnts = dd.entryInfoList(QDir::NoDotAndDotDot | QDir::AllDirs);
-        for (const auto &mnt : mnts) {
-            auto &&path = mnt.absoluteFilePath();
-            QDir ddd(path);
-            if (ddd.entryList(QDir::NoDotAndDotDot | QDir::AllEntries).count() == 0) {
-                qDebug() << ddd.path() << "was cleaned";
-                rmdir(path);
-            }
-        }
-    }
 }
